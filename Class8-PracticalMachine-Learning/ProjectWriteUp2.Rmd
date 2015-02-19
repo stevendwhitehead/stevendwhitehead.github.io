@@ -1,0 +1,157 @@
+---
+title: "Practical Machine Learning Project Report"
+author: "Steven Whitehead"
+date: "02/18/2015"
+output: html_document
+---
+This document describes my approach to solving the prediction problem associated with the Practical Machine Learning Class Project. The goal of the project is to develop a predictor that can accurately classify an individual's exercise movements into one of 5 categories, based on a series of sensor readings.
+
+## Summary of Approach
+The following steps describe my approach to developing a predictor/classifier:  
+1. Pre-processing: Removed predictor variables with missing data.  
+2. Model Selection: Chose a Random Forest Classifier.  
+3. Predictor-Sizing: Identified how many predictor variables to use.  
+4. Predictor-Filtering: Identified the most important predictor variables.  
+5. Trained the predictor, using cross validation to estimate Test Error.  
+6. Made my predictions for the test set.  
+
+***
+
+## Step 1. Pre-Processing:
+I began my analysis by inspecting the training data. After looking directly at the training .csv file and reading the documentation related to the source data, it became apparent than many of the predictor fields were derived by temporally aggregating information from raw sensor readings. Since most of the samples did not contain these derived fields, I decided to filter them out and work with just the raw data. This reduced the number of features substantially. While I was at it, I also stripped other irrelevant fields (such as username and various timestamps, etc.) from the raw input file. This left me with a .csv file containing only the output values ("classe") and the raw sensor measure values (52 sensors measure types in total).  
+
+This step was performed manually, and the results were stored in a file named: "pml-training_RAW_PREDICTORS_AND_CLASSE_ONLY.csv."    
+
+Following is the R-code used to load the scrubbed training data file.  
+
+```{r}
+## We'll begin by loading the 'scrubbed' training data-file.
+trainingData<-read.csv("pml-training_RAW_PREDICTORS_AND_CLASSE_ONLY.csv")
+dim(trainingData)
+```
+As you can see, there are 19622 rows and 53 columns total.  
+
+***
+
+## Step 2: Model Selection:
+After futzing around with the data a while (and looking at feature correlation and what-not for a while), I decided to just try to fit a Random Forest classifier to the raw data. I decided to go with a Random Forest because 1) it is said to work well on data sets with many features, and 2) it is said to be a very good 'out-of-the-box' method. So I thought I'd start there.  
+
+***
+
+## Step 3: Predictor Sizing:
+I didn't want to just throw all the data (52 features) at the Random Forest algorithm, so I thought I'd do some analysis to see how many features were really needed. I used the rfcv() function in the "randomForest" package to do this task.    
+Specifically, the rfcv() function performs a series of cross-validated random forest fits with sequentially decreasing numbers of predictors, choosing at each step the most relevant predictors.  
+
+Here is the R-code to perform this step.  
+
+```{r}
+## load the necessary libraries.
+library(caret)
+library(randomForest)
+
+## Let's set the seed for repeatability.
+set.seed(103060)
+
+## split training data into predictors and outcomes.
+trainingPredictors <- trainingData[,1:52]
+trainingOutcomes <- trainingData[,53]
+
+## due to the data intensiveness of this next operation 
+## (indeed my laptop started overheating and shut down)
+## I run rfcv() on only a subset of the training data (20% or so)
+inSubset <- ((1:19622) %% 5) == 0
+trainingPredictorsSubset <- trainingPredictors[inSubset,]
+trainingOutcomesSubset <- trainingOutcomes[inSubset]
+
+## I used 5-fold cross-validation, and decreased the feature set size by 75% on each iteration.
+## This step takes time to perform.
+rfcvResult <- rfcv(trainingPredictorsSubset, trainingOutcomesSubset, cv.fold=5, scale="log", step=0.75)
+```
+
+By looking at the results of this function (namely rfcfResult$error.cv) we can see how far we can reduce the number of predictors and still get pretty good results.  
+
+```{r}
+## Here is a dump of the error.cv attribute.
+rfcvResult$error.cv
+## and here is a plot.
+plot(x=names(rfcvResult$error.cv), y=rfcvResult$error.cv)
+```
+    
+From the graph above, it looks like we want to keep 10-15 predictor variables to keep our accuracy up.
+I decided to keep 15 variables.
+
+***
+
+## Step 4: Predictor Selection
+Next, I had to figure out which variables to keep. To do this, I fit a random forest model using the randomForest() function, while setting the *importance* option to TRUE. From this, I could determine the most important predictor variables.  
+Here is the code:
+
+```{r}
+## To keep the processing time down, I limited the number of trees in the forest to 250.
+rfFit <- randomForest(trainingPredictorsSubset, trainingOutcomesSubset, importance=TRUE, ntree=250)
+```
+Here is a plot of the *importance* information:  
+
+```{r}
+varImpPlot(rfFit, sort=TRUE, type=2)
+```
+
+Next, I sorted the *importance* attribute and extracted the top 15 predictors.  
+
+```{r}
+## the 7th column holds the Gini measure.
+sortedImportance <- sort(rfFit$importance[,7], decreasing=TRUE)
+topPredictorNames <- names(sortedImportance[1:15])
+topPredictorNames
+```
+
+We, now, have identified the top 15 predictor variables. We'll narrow our training data to using only these predictor variables.  
+
+***
+
+## Step 5: Training, with CV
+Finally, we're ready to fit a Random Forest on the full-sized data set, filtered to use only our most important features. I used the train() function for this task, passing in the filtered training data.  
+
+Also, to get an estimate for test-error rate, I estimated the fit accuracy, with 5-fold cross-validation.  
+
+This step took a while on my laptop.
+
+```{r}
+## set up the final training data.
+trainingAllFilteredPredictors <- trainingData[,topPredictorNames]
+trainingAllOutcomes <- trainingData[,"classe"]
+
+# set up cross-validation parameters.
+myTrainControl = trainControl(method="cv", number=5)
+
+# train the model
+rfFit2 <- train(x=trainingAllFilteredPredictors, y=trainingAllOutcomes, method="rf", trControl=myTrainControl)
+# here's a summary of the best/finalfit.
+rfFit2$finalModel
+```
+
+Based on the above, you can see the fit looks pretty good, with an estimated error rate of 0.9% or so.  
+
+***
+  
+## Step 6: Prediction
+Given the good fit in Step 5, I then went ahead and generated predictions on the test set. Here is the code.  
+
+```{r}
+# First load the test data
+testAllData <- read.csv( "pml-testing.csv")
+dim(testAllData)
+
+#Filter the data down to just the target predictor variables
+testPredictors <- testAllData[,topPredictorNames]
+dim(testPredictors)
+
+# predict the outcomes for these test cases.
+predictedResults <- predict(rfFit2, testPredictors)
+# Here are the predictions
+predictedResults
+```
+
+And there you have it.  
+That's it.  
+
